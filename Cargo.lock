@@ -127,6 +127,7 @@ dependencies = [
 name = "jajo"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "uring-sys2",
 ]
 
