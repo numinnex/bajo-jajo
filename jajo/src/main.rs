@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, mem::{self, MaybeUninit}};
 
 pub mod cqueue;
 pub mod squeue;
@@ -90,7 +90,23 @@ pub struct IoUring {
 }
 
 impl IoUring {
-    pub fn new_with_flags() -> Self {}
+    pub fn new_with_flags(entries: u32, flags: SetupFlags, features: SetupFeatures) -> io::Result<Self> {
+        unsafe {
+            let mut p:  uring_sys2::io_uring_params = mem::zeroed();
+            p.flags = flags.bits();
+            p.features = features.bits();
+            let mut ring = MaybeUninit::uninit();
+            resultify(
+                uring_sys2::io_uring_queue_init_params(
+                    entries,
+                   ring.as_mut_ptr(),
+                   &mut p
+                )
+            )?;
+            // TODO assert the size of ring.
+            Ok(Self {ring: ring.assume_init()})
+        }
+    }
 }
 
 pub(crate) fn resultify(x: i32) -> io::Result<u32> {
