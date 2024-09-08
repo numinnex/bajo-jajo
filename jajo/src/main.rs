@@ -1,9 +1,29 @@
-use std::{io, mem::{self, MaybeUninit}};
+use std::{
+    io::{self, Read},
+    mem::{self, MaybeUninit}, os::fd::AsRawFd
+};
+
+use cqueue::{CompletionQueue, CQE};
+use squeue::{SubmissionQueue, SQE};
 
 pub mod cqueue;
 pub mod squeue;
 fn main() {
-    println!("Hello, world");
+    let buf = [69u8; 128];
+    let mut read_buf = [0u8; 128];
+    let mut ring = IoUring::new_with_flags(1024, Default::default(), Default::default()).unwrap();
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).open("test").unwrap();
+    let fd = file.as_raw_fd();
+    if let Some(mut sqe) =  ring.prepare_sqe() {
+        sqe.prepare_write(&buf, fd, 0);
+    }
+    let _ = ring.submit_and_wait(1).expect("Failed to submit op to kernel");
+    if let Some(mut sqe) = ring.prepare_sqe() {
+        sqe.prepare_read(&mut read_buf, fd, 0);
+    }
+    let res = ring.submit_and_wait(1).expect("Failed to submit op to kernel");
+    println!("read op response: {}, read values: {:?}", res, read_buf);
+    // file.read_exact(&mut read_buf).unwrap();
 }
 
 bitflags::bitflags! {
@@ -27,13 +47,19 @@ bitflags::bitflags! {
     }
 }
 
+impl Default for SetupFeatures {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 bitflags::bitflags! {
     pub struct SetupFlags: u32 {
         const IORING_SETUP_IOPOLL	         = 1 << 0;	/* io_context is polled */
-        const IORING_SETUP_SQPOLL            = 1 << 1;/* SQ poll thread */
+        const IORING_SETUP_SQPOLL            = 1 << 1;  /* SQ poll thread */
         const IORING_SETUP_SQ_AFF	         = 1 << 2;	/* sq_thread_cpu is valid */
         const IORING_SETUP_CQSIZE	         = 1 << 3;	/* app defines CQ size */
-        const IORING_SETUP_CLAMP	         = 1 << 4; /* clamp SQ/CQ ring sizes */
+        const IORING_SETUP_CLAMP	         = 1 << 4;  /* clamp SQ/CQ ring sizes */
         const IORING_SETUP_ATTACH_WQ	     = 1 << 5;	/* attach to existing wq */
         const IORING_SETUP_R_DISABLED	     = 1 << 6;	/* start with ring disabled */
         const IORING_SETUP_SUBMIT_ALL	     = 1 << 7;	/* continue submit on error */
@@ -85,27 +111,63 @@ bitflags::bitflags! {
 
 }
 
+impl Default for SetupFlags {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 pub struct IoUring {
     ring: uring_sys2::io_uring,
 }
 
 impl IoUring {
-    pub fn new_with_flags(entries: u32, flags: SetupFlags, features: SetupFeatures) -> io::Result<Self> {
+    pub fn new_with_flags(
+        entries: u32,
+        flags: SetupFlags,
+        features: SetupFeatures,
+    ) -> io::Result<Self> {
         unsafe {
-            let mut p:  uring_sys2::io_uring_params = mem::zeroed();
+            let mut p: uring_sys2::io_uring_params = mem::zeroed();
             p.flags = flags.bits();
             p.features = features.bits();
             let mut ring = MaybeUninit::uninit();
-            resultify(
-                uring_sys2::io_uring_queue_init_params(
-                    entries,
-                   ring.as_mut_ptr(),
-                   &mut p
-                )
-            )?;
+            resultify(uring_sys2::io_uring_queue_init_params(
+                entries,
+                ring.as_mut_ptr(),
+                &mut p,
+            ))?;
             // TODO assert the size of ring.
-            Ok(Self {ring: ring.assume_init()})
+            Ok(Self {
+                ring: ring.assume_init(),
+            })
         }
+    }
+
+    fn sq(&mut self) -> SubmissionQueue {
+        SubmissionQueue::new(self)
+    }
+
+    fn cq(&mut self) -> CompletionQueue {
+        CompletionQueue::new(self)
+    }
+
+    pub fn prepare_sqe<'a>(&mut self) -> Option<SQE<'a>> {
+        unsafe { self.sq().prepare_sqe() }
+    }
+
+    pub fn submit_and_wait(&mut self, count: u32) -> std::io::Result<u32> {
+        self.sq().submit_and_wait(count)
+    }
+
+    pub fn peek_cqe(&mut self) -> Option<CQE> {
+        self.cq().peek_for_cqe()
+    }
+}
+
+impl Drop for IoUring {
+    fn drop(&mut self) {
+        unsafe { uring_sys2::io_uring_queue_exit(&mut self.ring) }
     }
 }
 
