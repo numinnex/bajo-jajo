@@ -23,7 +23,6 @@ fn main() {
     }
     let res = ring.submit_and_wait(1).expect("Failed to submit op to kernel");
     println!("read op response: {}, read values: {:?}", res, read_buf);
-    // file.read_exact(&mut read_buf).unwrap();
 }
 
 bitflags::bitflags! {
