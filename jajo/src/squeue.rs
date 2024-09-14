@@ -28,6 +28,10 @@ impl<'ring> SubmissionQueue<'ring> {
     pub fn submit_and_wait(&mut self, count: u32) -> std::io::Result<u32> {
         resultify(unsafe { uring_sys2::io_uring_submit_and_wait(self.ring, count) })
     }
+
+    pub fn submit(&mut self) -> std::io::Result<u32> {
+        resultify(unsafe { uring_sys2::io_uring_submit(self.ring) })
+    }
 }
 
 pub struct SQE<'a> {
@@ -56,8 +60,14 @@ impl<'a> SQE<'a> {
                 fd as _,
                 buf.as_mut_ptr() as _,
                 buf.len() as _,
-                offset
+                offset,
             )
+        }
+    }
+
+    pub fn prepare_nop(&mut self) {
+        unsafe {
+            uring_sys2::io_uring_prep_nop(self.sqe);
         }
     }
 
@@ -68,7 +78,7 @@ impl<'a> SQE<'a> {
                 fd as _,
                 buf.as_ptr() as _,
                 buf.len() as _,
-                offset
+                offset,
             )
         }
     }

@@ -7,3 +7,4 @@ default-run = "jajo"
 [dependencies]
 uring-sys2 = "0.9.2"
 bitflags = "2.6.0"
+io-uring = "0.6.4"

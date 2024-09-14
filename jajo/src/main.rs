@@ -1,7 +1,11 @@
 use std::{
-    io::{self, Read},
-    mem::{self, MaybeUninit}, os::fd::AsRawFd
+    io,
+    mem::{self, MaybeUninit},
+    time::Instant,
 };
+
+const ITER_COUNT: u32 = 10_000;
+const BATCH_SIZE: u32 = 1024;
 
 use cqueue::{CompletionQueue, CQE};
 use squeue::{SubmissionQueue, SQE};
@@ -9,20 +13,70 @@ use squeue::{SubmissionQueue, SQE};
 pub mod cqueue;
 pub mod squeue;
 fn main() {
-    let buf = [69u8; 128];
-    let mut read_buf = [0u8; 128];
-    let mut ring = IoUring::new_with_flags(1024, Default::default(), Default::default()).unwrap();
-    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).open("test").unwrap();
-    let fd = file.as_raw_fd();
-    if let Some(mut sqe) =  ring.prepare_sqe() {
-        sqe.prepare_write(&buf, fd, 0);
+    // bajo_jajo
+    println!("Running primitive benchmark for bajo_jajo");
+    let flags = SetupFlags::IORING_SETUP_SQE128 | SetupFlags::IORING_SETUP_CQE32;
+    let mut ring = IoUring::new_with_flags(BATCH_SIZE, flags, Default::default()).unwrap();
+    let mut results = Vec::new();
+    let mut i = 0;
+    for _ in 0..ITER_COUNT {
+        let now = Instant::now();
+        while i < BATCH_SIZE {
+            if let Some(mut sqe) = ring.prepare_sqe() {
+                sqe.prepare_nop();
+            }
+            i += 1;
+        }
+        let _ = ring
+            .submit_and_wait(BATCH_SIZE)
+            .expect("Failed to submit nop");
+        i = 0;
+        let elapsed = now.elapsed();
+        let nanos = elapsed.as_nanos();
+        results.push(nanos);
     }
-    let _ = ring.submit_and_wait(1).expect("Failed to submit op to kernel");
-    if let Some(mut sqe) = ring.prepare_sqe() {
-        sqe.prepare_read(&mut read_buf, fd, 0);
+    results.sort();
+    let last_idx = results.len() - 1;
+    let avg = results.iter().sum::<u128>() / last_idx as u128;
+    let p50 = results[last_idx / 2];
+    let p75 = results[last_idx * 75 / 100];
+    let p99 = results[last_idx * 99 / 100];
+    println!(
+        "Average: {:.1}ns, P50: {:.1}ns, P75: {:.1}ns, P99: {:.1}ns",
+        avg, p50, p75, p99
+    );
+
+    // io-uring
+    println!("Running primitive benchmark for io-uring");
+    let mut io_uring = io_uring::IoUring::new(BATCH_SIZE).unwrap();
+    let mut results = Vec::new();
+    let mut i = 0;
+    for _ in 0..ITER_COUNT {
+        let now = Instant::now();
+        while i < BATCH_SIZE {
+            let mut sq = io_uring.submission();
+            match unsafe { sq.push(&io_uring::opcode::Nop::new().build()) } {
+                Ok(_) => i += 1,
+                Err(_) => break,
+            };
+        }
+        i = 0;
+        io_uring.submit_and_wait(BATCH_SIZE as _).unwrap();
+        let elapsed = now.elapsed();
+        let nanos = elapsed.as_nanos();
+        results.push(nanos);
     }
-    let res = ring.submit_and_wait(1).expect("Failed to submit op to kernel");
-    println!("read op response: {}, read values: {:?}", res, read_buf);
+
+    results.sort();
+    let last_idx = results.len() - 1;
+    let avg = results.iter().sum::<u128>() / last_idx as u128;
+    let p50 = results[last_idx / 2];
+    let p75 = results[last_idx * 75 / 100];
+    let p99 = results[last_idx * 99 / 100];
+    println!(
+        "Average: {:.1}ns, P50: {:.1}ns, P75: {:.1}ns, P99: {:.1}ns",
+        avg, p50, p75, p99
+    );
 }
 
 bitflags::bitflags! {
@@ -125,7 +179,7 @@ impl IoUring {
         entries: u32,
         flags: SetupFlags,
         features: SetupFeatures,
-    ) -> io::Result<Self> {
+    ) -> std::io::Result<Self> {
         unsafe {
             let mut p: uring_sys2::io_uring_params = mem::zeroed();
             p.flags = flags.bits();
@@ -157,6 +211,10 @@ impl IoUring {
 
     pub fn submit_and_wait(&mut self, count: u32) -> std::io::Result<u32> {
         self.sq().submit_and_wait(count)
+    }
+
+    pub fn submit(&mut self) -> std::io::Result<u32> {
+        self.sq().submit()
     }
 
     pub fn peek_cqe(&mut self) -> Option<CQE> {
